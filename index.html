@@ -102,7 +102,7 @@ main{padding:4px 0 0}
 .grab{width:40px;height:5px;border-radius:3px;background:var(--line);margin:0 auto 10px}
 .sheet h3{margin:2px 0 12px;font-size:18px}
 .lbl{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:14px 0 6px}
-textarea,input[type=text]{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--bg);
+textarea,input[type=text],input[type=password]{width:100%;font:inherit;font-size:16px;color:var(--ink);background:var(--bg);
   border:1px solid var(--line);border-radius:10px;padding:10px 12px;resize:none}
 textarea:focus,input:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .seg{display:flex;gap:6px;flex-wrap:wrap}
@@ -117,6 +117,10 @@ textarea:focus,input:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .menu .btn small{display:block;font-weight:400;color:var(--muted);font-size:13px;margin-top:2px}
 .ready{margin-top:12px;padding:12px;border-radius:12px;background:var(--accent-soft);font-size:14px}
 .ready .btn{margin-top:10px;text-align:center}
+.ready input{margin-top:6px;background:var(--card)}
+.ready label{display:block;font-size:12px;font-weight:700;color:var(--muted);margin-top:10px}
+.sync{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:var(--muted);vertical-align:1px}
+.sync.ok{background:#3f9a4a}.sync.busy{background:#e0a030}.sync.err{background:#c62f1f}
 
 .toast{position:fixed;left:16px;right:16px;bottom:calc(92px + env(safe-area-inset-bottom));z-index:30;
   background:#2a1d17;color:#fff;border-radius:12px;padding:11px 14px;display:flex;align-items:center;gap:10px;
@@ -165,8 +169,10 @@ input[type=file]{display:none}
   <h3>Planner</h3>
   <button class="btn" id="exportBtn">Export to Excel for printing<small>All jobs, plus a page each for Tim and Wendy, set up for A4 landscape</small></button>
   <div id="readyBox"></div>
-  <button class="btn" id="importBtn">Import from Excel<small>Pick Action_Planner.xlsx (or an export from here) – replaces the list on this phone</small></button>
+  <button class="btn" id="importBtn">Import from Excel<small>Pick Action_Planner.xlsx (or an export from here) – replaces the whole list</small></button>
   <div id="importConfirm"></div>
+  <button class="btn" id="syncBtn">Sharing with Wendy<small id="syncSmall">Not set up – this list is on this phone only</small></button>
+  <div id="syncBox"></div>
   <input type="file" id="fileIn" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
   <div class="actions"><button class="btn" id="closeMenu">Close</button></div>
 </div>
@@ -183,8 +189,12 @@ const $=id=>document.getElementById(id);
 function load(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 function store(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 let tasks=load(KEY,[]);
+tasks.forEach(t=>{if(!t.updatedAt)t.updatedAt=t.created||Date.now()});
+const live=()=>tasks.filter(t=>!t.deleted);
+const touch=t=>{t.updatedAt=Date.now();return t};
 let ui=Object.assign({owner:'All',showDone:false},load(UIKEY,{}));
-const save=()=>store(KEY,tasks), saveUI=()=>store(UIKEY,ui);
+const saveLocal=()=>store(KEY,tasks), saveUI=()=>store(UIKEY,ui);
+const save=()=>{saveLocal();queueSync()};
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -199,20 +209,23 @@ const matchOwner=t=>ui.owner==='All'||t.owner===ui.owner;
 /* ---------- render ---------- */
 function render(){
   const now=seasonNow();
-  const active=tasks.filter(t=>!t.done);
+  const all=live(), active=all.filter(t=>!t.done);
   const dueNow=active.filter(t=>rank(t.when,now)===0&&matchOwner(t)).length;
-  $('sub').innerHTML=`<b>${now}</b> now · ${dueNow} due this season · ${active.filter(matchOwner).length} to do`;
+  $('sub').innerHTML=`${syncDot()}<b>${now}</b> now · ${dueNow} due this season · ${active.filter(matchOwner).length} to do`;
   $('chips').innerHTML=['All','Tim','Wendy'].map(o=>{
     const n=o==='All'?active.length:active.filter(t=>t.owner===o).length;
     return `<button class="chip${ui.owner===o?' on':''}" data-o="${o}">${o}<span>${n}</span></button>`}).join('');
   const L=$('list');
-  if(!tasks.length){
+  if(!all.length&&cfg.token&&!syncState.ever){L.innerHTML=syncState.status==='err'
+    ?`<div class="empty"><h2>Couldn’t fetch the shared list</h2><p>${esc(syncState.msg)}</p><p>Check the details under ⋯ › Sharing with Wendy.</p></div>`
+    :`<div class="empty"><h2>Fetching the shared list…</h2></div>`;return}
+  if(!all.length){
     L.innerHTML=`<div class="empty"><h2>Bring in your list</h2><p>Import the Tasks tab from your Action_Planner.xlsx in OneDrive, or tap + to add jobs one by one.</p>
       <button class="btn primary" id="emptyImport" style="width:100%">Import from Excel</button></div>`;
     $('emptyImport').onclick=()=>$('fileIn').click();
     return;
   }
-  const vis=sorted(tasks.filter(matchOwner),now);
+  const vis=sorted(all.filter(matchOwner),now);
   const groups=[0,1,2,3,4].map(r=>({r,items:vis.filter(t=>!t.done&&rank(t.when,now)===r)}));
   let html='';
   for(const g of groups){
@@ -244,7 +257,18 @@ function toast(msg,snap){
   undoSnap=snap||null; $('toastMsg').textContent=msg; $('toastUndo').style.display=snap?'':'none';
   $('toast').classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').classList.remove('show'),4500);
 }
-$('toastUndo').onclick=()=>{if(undoSnap){tasks=JSON.parse(undoSnap);save();render()}$('toast').classList.remove('show')};
+$('toastUndo').onclick=()=>{
+  if(undoSnap){
+    const old=JSON.parse(undoSnap), byId=new Map(old.map(t=>[t.id,t])), now=Date.now();
+    tasks=tasks.map(cur=>{
+      const prev=byId.get(cur.id);
+      if(!prev) return {...cur,deleted:true,updatedAt:now};
+      return JSON.stringify(prev)===JSON.stringify(cur)?cur:{...prev,updatedAt:now};
+    });
+    old.forEach(t=>{if(!tasks.some(x=>x.id===t.id))tasks.push({...t,updatedAt:now})});
+    save();render();
+  }
+  $('toast').classList.remove('show')};
 const snap=()=>JSON.stringify(tasks);
 
 /* ---------- list events ---------- */
@@ -253,7 +277,7 @@ $('list').addEventListener('click',e=>{
   const el=e.target.closest('[data-act]'); if(!el)return;
   const t=tasks.find(x=>x.id===el.closest('.row').dataset.id); if(!t)return;
   if(el.dataset.act==='tick'){
-    const s=snap(); t.done=!t.done; t.doneAt=t.done?Date.now():null; save(); render();
+    const s=snap(); t.done=!t.done; t.doneAt=t.done?Date.now():null; touch(t); save(); render();
     toast(t.done?`Done: ${t.task}`:`Back on the list: ${t.task}`,s);
   } else openEdit(t);
 });
@@ -291,18 +315,18 @@ $('saveBtn').onclick=()=>{
   const task=$('fTask').value.trim(); if(!task){$('fTask').focus();return}
   const s=snap();
   draft.task=task; draft.notes=$('fNotes').value.trim();
-  if(editing) Object.assign(editing,draft);
-  else tasks.push({id:uid(),done:false,doneAt:null,created:Date.now(),...draft});
+  if(editing) touch(Object.assign(editing,draft));
+  else tasks.push({id:uid(),done:false,doneAt:null,created:Date.now(),...draft,updatedAt:Date.now()});
   save(); closeSheets(); render(); toast(editing?'Saved':'Added',s);
 };
 $('delBtn').onclick=()=>{
   const b=$('delBtn');
   if(!b.classList.contains('arm')){b.classList.add('arm');b.textContent='Tap again to delete';return}
-  const s=snap(); tasks=tasks.filter(x=>x.id!==editing.id); save(); closeSheets(); render(); toast('Deleted',s);
+  const s=snap(); editing.deleted=true; touch(editing); save(); closeSheets(); render(); toast('Deleted',s);
 };
 
 /* ---------- menu ---------- */
-$('menuBtn').onclick=()=>{$('readyBox').innerHTML='';$('importConfirm').innerHTML='';openSheet('menuSheet')};
+$('menuBtn').onclick=()=>{$('readyBox').innerHTML='';$('importConfirm').innerHTML='';$('syncBox').innerHTML='';paintSyncSmall();openSheet('menuSheet')};
 $('closeMenu').onclick=closeSheets;
 
 /* ---------- Excel export ---------- */
@@ -328,7 +352,7 @@ function addSheet(wb,name,owner,now){
   const hdr=ws.getRow(4); hdr.values=['#','Task','Owner','When','Priority','Status','Notes']; hdr.height=20;
   hdr.eachCell(c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:BROWN}};c.font={name:'Arial',bold:true,color:{argb:'FFFFFFFF'},size:11};
     c.alignment={horizontal:'center',vertical:'middle'};c.border=box});
-  const list=sorted(tasks.filter(t=>!owner||t.owner===owner),now);
+  const list=sorted(live().filter(t=>!owner||t.owner===owner),now);
   list.forEach((t,i)=>{
     const r=rank(t.when,now);
     const row=ws.getRow(5+i);
@@ -350,7 +374,7 @@ let readyFile=null;
 $('exportBtn').onclick=async()=>{
   const box=$('readyBox');
   if(!window.ExcelJS){box.innerHTML='<div class="ready">The Excel tools haven’t loaded – check you’re online and try again.</div>';return}
-  if(!tasks.length){box.innerHTML='<div class="ready">There are no jobs to export yet.</div>';return}
+  if(!live().length){box.innerHTML='<div class="ready">There are no jobs to export yet.</div>';return}
   box.innerHTML='<div class="ready">Building…</div>';
   try{
     const now=seasonNow(), wb=new ExcelJS.Workbook(); wb.creator='Action Planner';
@@ -411,7 +435,8 @@ async function parseWorkbook(buf){
   if(!out.length)throw new Error('No jobs found under the Task heading');
   return out;
 }
-window.__importForTest=async buf=>{tasks=await parseWorkbook(buf);save();render();return tasks.length};
+function replaceAll(list){const now=Date.now();tasks.forEach(t=>{if(!t.deleted){t.deleted=true;t.updatedAt=now}});list.forEach(t=>t.updatedAt=now);tasks=tasks.concat(list)}
+window.__importForTest=async buf=>{replaceAll(await parseWorkbook(buf));save();render();return live().length};
 let pending=null;
 $('fileIn').onchange=async e=>{
   const f=e.target.files[0]; e.target.value=''; if(!f)return;
@@ -421,15 +446,106 @@ $('fileIn').onchange=async e=>{
   try{
     pending=await parseWorkbook(await f.arrayBuffer());
     const n=pending.length,d=pending.filter(t=>t.done).length;
-    if(!tasks.length){tasks=pending;pending=null;save();render();box.innerHTML=`<div class="ready">Imported ${n} jobs (${d} done).</div>`;return}
-    box.innerHTML=`<div class="ready">Found <b>${n} jobs</b> (${d} done) in ${esc(f.name)}. This will replace the ${tasks.length} jobs on this phone.<button class="btn primary" id="doImport">Replace my list</button></div>`;
-    $('doImport').onclick=()=>{const s=snap();tasks=pending;pending=null;save();render();closeSheets();toast(`Imported ${n} jobs`,s)};
+    if(!live().length){replaceAll(pending);pending=null;save();render();box.innerHTML=`<div class="ready">Imported ${n} jobs (${d} done).</div>`;return}
+    box.innerHTML=`<div class="ready">Found <b>${n} jobs</b> (${d} done) in ${esc(f.name)}. This will replace the ${live().length} jobs in the current list${cfg.token?' (for Wendy too)':''}.<button class="btn primary" id="doImport">Replace my list</button></div>`;
+    $('doImport').onclick=()=>{const s=snap();replaceAll(pending);pending=null;save();render();closeSheets();toast(`Imported ${n} jobs`,s)};
   }catch(err){box.innerHTML=`<div class="ready">Couldn’t read that file: ${esc(err.message||err)}</div>`}
 };
+
+
+/* ---------- sharing: sync through a private GitHub repository ---------- */
+const CFGKEY='actionPlanner.sync.v1';
+let cfg=Object.assign({owner:'hammondtimothy',repo:'planner-data',path:'planner.json',token:''},load(CFGKEY,{}));
+let syncState={status:cfg.token?'busy':'off',msg:'',ever:false,last:null};
+let syncing=false,again=false,syncTimer=null;
+function syncDot(){return cfg.token?`<span class="sync ${syncState.status==='ok'?'ok':syncState.status==='busy'?'busy':'err'}"></span>`:''}
+function syncText(){
+  if(!cfg.token)return 'Not set up – this list is on this phone only';
+  if(syncState.status==='ok')return `Shared · last synced ${new Date(syncState.last).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}`;
+  if(syncState.status==='busy')return 'Shared · syncing…';
+  return 'Shared · '+syncState.msg;
+}
+function paintSyncSmall(){$('syncSmall').textContent=syncText()}
+function setStatus(st,msg){syncState.status=st;if(msg!=null)syncState.msg=msg;render();if($('menuSheet').classList.contains('open'))paintSyncSmall()}
+const apiUrl=()=>`https://api.github.com/repos/${encodeURIComponent(cfg.owner.trim())}/${encodeURIComponent(cfg.repo.trim())}/contents/${cfg.path}`;
+function b64enc(str){const b=new TextEncoder().encode(str);let s='';for(let i=0;i<b.length;i+=0x8000)s+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(s)}
+function b64dec(x){return new TextDecoder().decode(Uint8Array.from(atob(x.replace(/\s/g,'')),c=>c.charCodeAt(0)))}
+function gh(method,body){
+  return fetch(apiUrl()+(method==='GET'?`?t=${Date.now()}`:''),{method,cache:'no-store',
+    headers:Object.assign({Authorization:`Bearer ${cfg.token.trim()}`,Accept:'application/vnd.github+json'},body?{'Content-Type':'application/json'}:{}),
+    body:body?JSON.stringify(body):undefined});
+}
+function ghError(code,put){
+  if(code===401)return 'GitHub didn’t accept the token – check it or make a new one';
+  if(code===403)return 'The token isn’t allowed to change the repository (needs Contents: Read and write)';
+  if(code===404)return 'Repository not found – check the account and repository names';
+  return `GitHub error ${code}`;
+}
+function merge(local,remote){
+  const m=new Map(local.map(t=>[t.id,t]));
+  for(const t of remote){const x=m.get(t.id);if(!x||(t.updatedAt||0)>=(x.updatedAt||0))m.set(t.id,t)}
+  const cutoff=Date.now()-90*864e5;
+  return [...m.values()].filter(t=>!(t.deleted&&t.updatedAt<cutoff));
+}
+const canon=list=>JSON.stringify(list.slice().sort((a,b)=>a.id<b.id?-1:1));
+function queueSync(){if(!cfg.token)return;clearTimeout(syncTimer);syncTimer=setTimeout(syncNow,700)}
+async function syncNow(){
+  if(!cfg.token)return;
+  if(syncing){again=true;return}
+  syncing=true;setStatus('busy');
+  try{
+    let done=false;
+    for(let attempt=0;attempt<4&&!done;attempt++){
+      const res=await gh('GET');let sha=null,remote=[];
+      if(res.status===200){const j=await res.json();sha=j.sha;const txt=b64dec(j.content||'');remote=(txt?JSON.parse(txt).tasks:[])||[]}
+      else if(res.status!==404)throw new Error(ghError(res.status));
+      const merged=merge(tasks,remote);
+      tasks=merged;saveLocal();render();
+      if(sha&&canon(merged)===canon(remote)){done=true;break}
+      const put=await gh('PUT',{message:'Planner update',content:b64enc(JSON.stringify({version:1,updated:new Date().toISOString(),tasks:merged})),...(sha?{sha}:{})});
+      if(put.ok){done=true;break}
+      if(put.status===409||put.status===422)continue;
+      throw new Error(ghError(put.status,true));
+    }
+    if(!done)throw new Error('Couldn’t save – please try again');
+    syncState.ever=true;syncState.last=Date.now();setStatus('ok','');
+  }catch(e){
+    setStatus('err',e instanceof TypeError?'Offline – changes are kept on this phone and will sync later':(e.message||'Sync failed'));
+  }finally{
+    syncing=false;if(again){again=false;queueSync()}
+  }
+}
+$('syncBtn').onclick=()=>{
+  const box=$('syncBox');
+  if(box.innerHTML){box.innerHTML='';return}
+  box.innerHTML=`<div class="ready">Both phones use the same private GitHub repository and access token. Enter the same details on Wendy’s phone.
+    <label for="sOwner">GitHub account</label><input type="text" id="sOwner" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="sRepo">Repository</label><input type="text" id="sRepo" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="sToken">Access token</label><input type="password" id="sToken" placeholder="github_pat_…" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button class="btn primary" id="sSave">Save and sync now</button>
+    ${cfg.token?'<button class="btn" id="sOff">Stop sharing on this phone</button>':''}
+    <div id="sMsg" style="margin-top:8px"></div></div>`;
+  $('sOwner').value=cfg.owner;$('sRepo').value=cfg.repo;$('sToken').value=cfg.token;
+  $('sSave').onclick=async()=>{
+    cfg.owner=$('sOwner').value.trim();cfg.repo=$('sRepo').value.trim();cfg.token=$('sToken').value.trim();
+    store(CFGKEY,cfg);
+    if(!cfg.token){$('sMsg').textContent='Paste the access token first.';return}
+    $('sMsg').textContent='Connecting…';syncState.ever=false;
+    await syncNow();
+    $('sMsg').textContent=syncState.status==='ok'?`Connected – ${live().length} jobs are now shared.`:syncState.msg;
+    paintSyncSmall();
+  };
+  const off=$('sOff');
+  if(off)off.onclick=()=>{cfg.token='';store(CFGKEY,cfg);syncState={status:'off',msg:'',ever:false,last:null};box.innerHTML='';paintSyncSmall();render()};
+};
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)syncNow()});
+setInterval(()=>{if(!document.hidden)syncNow()},90000);
+window.__cfgForTest=c=>{Object.assign(cfg,c);store(CFGKEY,cfg);return syncNow()};
 
 /* keep the season current if the app is left open */
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)render()});
 render();
+syncNow();
 })();
 </script>
 </body>
